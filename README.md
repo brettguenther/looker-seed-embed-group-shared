@@ -34,31 +34,33 @@ Run the script using `uv run main.py`.
 - `--external_group_id` (Required): ID for the embed group.
 - `--subfolders`: List of subfolders to create (e.g., "Finance" "Marketing"). Default: "Subfolder A" "Subfolder B".
 - `--source_dashboard_ids`: List of existing dashboard IDs to copy to the group's folder.
-- `--lookml_dashboard_ids`: List of LookML Dashboard IDs to import. **Pass '\*' to import ALL LookML dashboards.**
+- `--lookml_dashboard_ids`: List of LookML Dashboard IDs to import to the **Embed Group Root**. **Pass '*' to import ALL LookML dashboards to the root.**
+- `--source_dashboard_mapping`: Pairs of `dashboard_id:subfolder_name` (e.g., "123:Finance").
+- `--lookml_dashboard_mapping`: Pairs of `lookml_id:subfolder_name` (e.g., "model::dash:Marketing").
 
 ### Examples
 
 **Basic Usage:**
 
 ```bash
-uv run main.py --external_user_id "seed_user_01" --external_group_id "seed_group_01"
+uv run main.py --external_group_id "seed_group_01"
 ```
 
-**Custom Subfolders and Copy Dashboards:**
+**Mapped Dashboards and Custom Subfolders:**
 
 ```bash
 uv run main.py \
-  --external_user_id "seed_user_01" \
   --external_group_id "seed_group_01" \
-  --subfolders "Data" "Reports" \
-  --source_dashboard_ids "123" "456"
+  --subfolders "General" \
+  --source_dashboard_mapping "123:Finance" "456:Finance" \
+  --lookml_dashboard_mapping "model::dash1:Marketing"
 ```
+*Creates "General", "Finance", and "Marketing" folders. Copies dash 123/456 to Finance, imports dash1 to Marketing.*
 
-**Import ALL LookML Dashboards:**
+**Import ALL LookML Dashboards to Root:**
 
 ```bash
 uv run main.py \
-  --external_user_id "seed_user_01" \
   --external_group_id "seed_group_01" \
   --lookml_dashboard_ids "*"
 ```

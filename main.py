@@ -1,6 +1,6 @@
 import argparse
 import sys
-from typing import List, Optional
+from typing import List, Optional, Dict, Union
 
 import looker_sdk
 from looker_sdk import models40 as models
@@ -38,22 +38,13 @@ def find_embed_folder_for_external_group(
     sdk: looker_sdk.methods40.Looker40SDK, external_group_id: str
 ) -> Optional[models.Folder]:
     """Finds the folder associated with the external group ID."""
-    # base finder strategy off naming of the embed folder + parent is the embed shared root
     try:
-        # TODO: limit fields returned
-        groups = sdk.search_groups(external_group_id=external_group_id)
-        if not groups:
-            print(f"Group with external_id '{external_group_id}' not found.")
-            return None
-
-        embed_group_id = groups[0].id
-
         # Validate parent group has "Embed Shared" root for external group
         folders = sdk.search_folders(name=external_group_id)
+        embed_folder = None
         for folder in folders:
             if folder.is_embed:
-                print(f"Found folder: {folder.name} (ID: {folder.id})")
-                # TODO: limit fields returned
+                # print(f"Found folder: {folder.name} (ID: {folder.id})")
                 parent_folder = sdk.folder_parent(folder.id)
                 if parent_folder.is_embed_shared_root:
                     embed_folder = folder
@@ -66,84 +57,130 @@ def find_embed_folder_for_external_group(
 
 def create_subfolders(
     sdk: looker_sdk.methods40.Looker40SDK, parent_folder_id: str, subfolders: List[str]
-):
-    """Creates subfolders under the given parent folder."""
+) -> Dict[str, str]:
+    """Creates subfolders under the given parent folder and returns a map of name -> id."""
+    folder_map = {}
     for folder_name in subfolders:
         try:
             # Check if exists first to be idempotent
             existing = sdk.search_folders(parent_id=parent_folder_id, name=folder_name)
             if existing:
                 print(f"Folder '{folder_name}' already exists (ID: {existing[0].id}).")
+                folder_map[folder_name] = existing[0].id
                 continue
 
             folder = sdk.create_folder(
                 body=models.CreateFolder(name=folder_name, parent_id=parent_folder_id)
             )
             print(f"Created folder '{folder_name}' (ID: {folder.id}).")
+            folder_map[folder_name] = folder.id
         except SDKError as e:
             print(f"Error creating folder '{folder_name}': {e}")
+    return folder_map
 
 
 def copy_dashboards(
-    sdk: looker_sdk.methods40.Looker40SDK, source_dashboard_ids: List[str], target_folder_id: str
+    sdk: looker_sdk.methods40.Looker40SDK, 
+    source_dashboard_ids: List[str], 
+    target_folder_id: str,
+    dashboard_mapping: Optional[Dict[str, str]] = None
 ):
-    """Copies existing user defined dashboards to the target folder."""
+    """Copies existing user defined dashboards to the target folder(s)."""
+    # 1. Copy unmapped dashboards to root
     for dash_id in source_dashboard_ids:
         try:
             sdk.copy_dashboard(
                 dashboard_id=dash_id,
                 folder_id=target_folder_id
             )
-            print(f"Copied dashboard '{dash_id}' to folder {target_folder_id}.")
+            print(f"Copied dashboard '{dash_id}' to root folder {target_folder_id}.")
         except SDKError as e:
             print(f"Error copying dashboard '{dash_id}': {e}")
 
+    # 2. Copy mapped dashboards
+    if dashboard_mapping:
+        for dash_id, folder_id in dashboard_mapping.items():
+            try:
+                sdk.copy_dashboard(
+                    dashboard_id=dash_id,
+                    folder_id=folder_id
+                )
+                print(f"Copied dashboard '{dash_id}' to folder {folder_id}.")
+            except SDKError as e:
+                print(f"Error copying dashboard '{dash_id}' to mapped folder: {e}")
+
 
 def import_lookml_dashboards(
-    sdk: looker_sdk.methods40.Looker40SDK, lookml_dashboard_ids: List[str], target_folder_id: str
+    sdk: looker_sdk.methods40.Looker40SDK, 
+    lookml_dashboard_ids: List[str], 
+    target_folder_id: str,
+    dashboard_mapping: Optional[Dict[str, str]] = None
 ):
-    """Imports LookML dashboards to the target folder as UDDs."""
-    # If empty list is passed (should be caught by caller, but safety check), do nothing?
-    # Wait, requirement was: "If passed with NO arguments (empty list), import ALL".
-    # Caller should handle the logic of "empty list means all" before calling this? 
-    # Or we handle it here. Let's handle it here for safety if the list is empty.
+    """Imports LookML dashboards to the target folder(s) as UDDs."""
     
     dashboards_to_import = lookml_dashboard_ids
     
+    # Handle wildcard or empty list for MAIN list
     if len(dashboards_to_import) == 1 and dashboards_to_import[0] == '*':
         print("Wildcard '*' provided, fetching ALL LookML dashboards...")
         try:
             all_dashboards = sdk.all_lookml_dashboards()
-            dashboards_to_import = [d.name for d in all_dashboards if d.name] # name is the ID usually for LookML dash
+            dashboards_to_import = [d.name for d in all_dashboards if d.name]
             print(f"Found {len(dashboards_to_import)} LookML dashboards.")
         except SDKError as e:
             print(f"Error fetching all LookML dashboards: {e}")
-            return
-    elif not dashboards_to_import:
-        print("No LookML dashboards specified.")
-        return
+            return # Don't process wildcard if fetch fails
 
-    for dash_id in dashboards_to_import:
-        try:
-            # import_lookml_dashboard returns the created dashboard
-            new_dash = sdk.import_lookml_dashboard(
-                lookml_dashboard_id=dash_id,
-                space_id=target_folder_id # Note: space_id param is mapped to folder_id in v4.0 usually, let's verify arg name
-            )
-            # Argument name for import_lookml_dashboard in python sdk might be different or body based?
-            # Checking recent SDKs, `import_lookml_dashboard` takes `lookml_dashboard_id` and `space_id` (folder_id).
-            print(f"Imported LookML dashboard '{dash_id}' as '{new_dash.id}' in folder {target_folder_id}.")
-        except SDKError as e:
-            print(f"Error importing LookML dashboard '{dash_id}': {e}")
+    # 1. Import unmapped dashboards to root
+    if dashboards_to_import:
+        for dash_id in dashboards_to_import:
+            try:
+                new_dash = sdk.import_lookml_dashboard(
+                    lookml_dashboard_id=dash_id,
+                    space_id=target_folder_id
+                )
+                print(f"Imported LookML dashboard '{dash_id}' as '{new_dash.id}' in root folder {target_folder_id}.")
+            except SDKError as e:
+                print(f"Error importing LookML dashboard '{dash_id}': {e}")
+
+    # 2. Import mapped dashboards
+    if dashboard_mapping:
+        for dash_id, folder_id in dashboard_mapping.items():
+            try:
+                new_dash = sdk.import_lookml_dashboard(
+                    lookml_dashboard_id=dash_id,
+                    space_id=folder_id
+                )
+                print(f"Imported LookML dashboard '{dash_id}' as '{new_dash.id}' in mapped folder {folder_id}.")
+            except SDKError as e:
+                print(f"Error importing LookML dashboard '{dash_id}' to mapped folder: {e}")
+
+
+def parse_mapping(mapping_args: Optional[List[str]]) -> Dict[str, str]:
+    """Parses a list of 'id:name' strings into a dictionary {id: name}."""
+    mapping = {}
+    if not mapping_args:
+        return mapping
+    for item in mapping_args:
+        if ':' in item:
+            key, val = item.rsplit(':', 1)
+            mapping[key.strip()] = val.strip()
+        else:
+            print(f"Warning: Invalid mapping format '{item}'. Expected 'id:folder_name'. Skipping.")
+    return mapping
 
 
 def main():
     parser = argparse.ArgumentParser(description="Seed Looker content for an embed group.")
     parser.add_argument("--external_group_id", required=True, help="External Group ID for the embed group.")
     parser.add_argument("--subfolders", nargs="*", default=None, help="List of subfolders to create.")
-    parser.add_argument("--source_dashboard_ids", nargs="*", default=None, help="List of source Dashboard IDs to copy.")
-    parser.add_argument("--lookml_dashboard_ids", nargs="*", default=None, help="List of LookML Dashboard IDs to import. Pass '*' to import ALL. If omitted or empty, imports None.")
+    parser.add_argument("--source_dashboard_ids", nargs="*", default=None, help="List of source Dashboard IDs to copy to root.")
+    parser.add_argument("--lookml_dashboard_ids", nargs="*", default=None, help="List of LookML Dashboard IDs to import to root. Pass '*' to import ALL.")
     
+    # New Mapping Arguments
+    parser.add_argument("--source_dashboard_mapping", nargs="+", help="Map source dashboards to subfolders. Format: id:folder_name")
+    parser.add_argument("--lookml_dashboard_mapping", nargs="+", help="Map LookML dashboards to subfolders. Format: id:folder_name")
+
     args = parser.parse_args()
 
     # Initialize SDK
@@ -158,16 +195,55 @@ def main():
         print("Exiting: Could not find target folder.")
         sys.exit(1)
 
-    # 3. Create subfolders
-    if args.subfolders is not None:
-        create_subfolders(sdk, folder.id, args.subfolders)
+    # 3. Resolve Folder Logic
+    # Collect all unique folder names from args.subfolders AND mappings
+    needed_subfolders = set()
+    
+    if args.subfolders:
+        needed_subfolders.update(args.subfolders)
+    
+    source_mapping_raw = parse_mapping(args.source_dashboard_mapping)
+    lookml_mapping_raw = parse_mapping(args.lookml_dashboard_mapping)
+    
+    needed_subfolders.update(source_mapping_raw.values())
+    needed_subfolders.update(lookml_mapping_raw.values())
+
+    # Create all needed subfolders
+    folder_map_name_to_id = {}
+    if needed_subfolders:
+        print(f"Ensuring subfolders exist: {needed_subfolders}")
+        folder_map_name_to_id = create_subfolders(sdk, folder.id, list(needed_subfolders))
+
+    # Resolve mappings to use IDs instead of names
+    source_mapping_ids = {}
+    for dash_id, folder_name in source_mapping_raw.items():
+        if folder_name in folder_map_name_to_id:
+            source_mapping_ids[dash_id] = folder_map_name_to_id[folder_name]
+        else:
+             print(f"Warning: Folder '{folder_name}' for dashboard '{dash_id}' was not created. Skipping.")
+
+    lookml_mapping_ids = {}
+    for dash_id, folder_name in lookml_mapping_raw.items():
+        if folder_name in folder_map_name_to_id:
+            lookml_mapping_ids[dash_id] = folder_map_name_to_id[folder_name]
+        else:
+             print(f"Warning: Folder '{folder_name}' for LookML dashboard '{dash_id}' was not created. Skipping.")
 
     # 4. Migrate content
-    if args.source_dashboard_ids is not None:
-        copy_dashboards(sdk, args.source_dashboard_ids, folder.id)
+    # Pass both list (for root) and mapping (for subfolders)
+    copy_dashboards(
+        sdk, 
+        args.source_dashboard_ids if args.source_dashboard_ids else [], 
+        folder.id, 
+        dashboard_mapping=source_mapping_ids
+    )
     
-    if args.lookml_dashboard_ids is not None:
-        import_lookml_dashboards(sdk, args.lookml_dashboard_ids, folder.id)
+    import_lookml_dashboards(
+        sdk, 
+        args.lookml_dashboard_ids if args.lookml_dashboard_ids else [], 
+        folder.id,
+        dashboard_mapping=lookml_mapping_ids
+    )
 
 if __name__ == "__main__":
     main()
